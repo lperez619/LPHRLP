@@ -1,7 +1,10 @@
 """
-HR Prediction Backtest Runner — Grid Search Edition
-Fetches all data ONCE per date, then sweeps all weight/blend combinations
-in memory (no extra API calls per config).
+HR Prediction Backtest Runner — Logistic Regression Edition
+Fetches all data ONCE per date, builds a feature matrix from the same per-row
+factors used by the old multiplicative model, and fits a logistic regression
+in log-odds space. Replaces the multiplicative grid search: learned weights
+replace hand-tuned exponents, a train/val date split guards against overfitting,
+and log-loss / Brier / AUC are reported alongside top-pick precision.
 
 Special cases:
   Tampa Bay  — always uses 2024 Savant PF (Tropicana Field; 2025 was temp stadium)
@@ -10,7 +13,7 @@ Special cases:
 
 Usage: python hr_backtest_runner.py
 """
-import math, time, io, json, os, itertools, pickle, hashlib
+import math, time, io, json, os, pickle
 import numpy as np
 from datetime import datetime
 import requests
@@ -66,8 +69,8 @@ PITCH_GROUPS = {
     'CH':'CH','FS':'CH','FO':'CH',
 }
 
-# ── grid search configurations ─────────────────────────────────────────────────
-# Only 2025 + 2026. 2026 only applied for dates >= USE_2026_FROM.
+# ── season / park-factor blends ───────────────────────────────────────────────
+# Used to combine 2025 and 2026 data sources before feature extraction.
 SEASON_WEIGHT_CONFIGS = [
     ('25×1  + 26×1',    {2025:  1.00, 2026: 1.00})#OG {2025:  1.0, 2026: 1.0}),
 ]
@@ -75,27 +78,6 @@ SEASON_WEIGHT_CONFIGS = [
 PF_BLEND_CONFIGS = [
     ('PF: 85/15',      {2025: 0.85, 2026: 0.15}),
 ]
-
-# ── tuning grid ────────────────────────────────────────────────────────────────
-# Each key maps to a list of values to try. All combos are swept in memory
-# after data is fetched — no extra API calls per combo.
-TUNE_PARAM_GRID = {
-    'picks_skip':     [0, 1, 2, 3],         # how many top picks per game to skip
-    'pwr_brl_exp':    [0.10, 0.20, 0.35, 0],# barrel rate exponent
-    'pwr_ev_exp':     [0.15, 0.30, 0.50, 0],# exit velo exponent
-    'form_cap_hi':    [1.50, 2.00, 3.00, 0],# recent batter form cap (high)
-    'form_min_pa':    [10, 20, 30],            # min recent PA to activate form signal
-    'vuln_cap':       [1.00, 1.10, 1.20, 1.30, 1.40, 1.50, 1.60, 1.70, 1.80, 1.90, 2.00, 2.10, 2.20],   # pitcher HR/9 vulnerability cap
-    'matchup_scale':  [0.03, 0.05, 0.08, 0.01, 0],   # pitch matchup sensitivity
-    'bvp_weight':     [0.0, 0.25, 0.5, 0.75, 1.0],    # BvP signal weight (0=off, 1=full)
-    'calibration':    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # global scale
-}
-
-# Pre-compute all combos as list of dicts
-_keys   = list(TUNE_PARAM_GRID.keys())
-_values = list(TUNE_PARAM_GRID.values())
-ALL_TUNE_CONFIGS = [dict(zip(_keys, combo)) for combo in itertools.product(*_values)]
-print(f'Tuning grid: {len(ALL_TUNE_CONFIGS)} configs')
 
 # ── team/stadium tables ────────────────────────────────────────────────────────
 CLUB_TO_TEAM = {
@@ -1384,16 +1366,12 @@ for date_str in TEST_DATES:
     save_cache(f'date_{date_str}', date_cache[date_str])
     time.sleep(0.5)
 
-# ── 3. Grid search ────────────────────────────────────────────────────────────
+# ── 3. Pre-compute row features ───────────────────────────────────────────────
 print()
 print('='*68)
-print(f'  TUNING GRID SEARCH  ({len(ALL_TUNE_CONFIGS)} configs × {len(TEST_DATES)} dates)')
+print(f'  PRE-COMPUTING FEATURES  ({len(TEST_DATES)} dates)')
 print('='*68)
 print()
-
-PICKS_SKIP  = 1   # skip this many top-ranked players per game
-PICKS_TAKE  = 2   # then take this many
-PICKS_PER_GAME = PICKS_TAKE
 
 # Pre-build batter_stats and dn_park once (single season/pf config)
 sw_label, sw_weights = SEASON_WEIGHT_CONFIGS[0]
@@ -1441,338 +1419,218 @@ for date_str in TEST_DATES:
     precomputed_rows[date_str] = rows
     print(f'    {date_str}: {len(rows)} eligible rows')
 
-_grid_key = 'grid_' + hashlib.md5(
-    ('v2' + str(sorted(TUNE_PARAM_GRID.items())) + ','.join(TEST_DATES)).encode()
-).hexdigest()[:12]
-_grid_cache = load_cache(_grid_key)
 
-if _grid_cache is not None:
-    all_avg_prec, all_date_prec, grid_results = _grid_cache
-    print(f'  Loaded {len(ALL_TUNE_CONFIGS):,}-config grid results from cache  [{_grid_key}]')
-else:
-    # ── GPU / vectorised setup ─────────────────────────────────────────────────────
-    try:
-        import cupy as cp
-        xp = cp
-        print(f'  Device: GPU (CuPy {cp.__version__})')
-    except ImportError:
-        xp = np
-        print('  Device: CPU NumPy — pip install cupy-cuda12x to use A100')
+# ── 4. Logistic regression fit ────────────────────────────────────────────────
+# Replaces the multiplicative grid search. Each factor from _precompute_row is
+# entered as log(factor) (a term in log-odds space), and logistic regression
+# learns the optimal weight for each one. This handles feature correlation
+# (e.g. brl_ratio ↔ ev_ratio) and gives calibrated probabilities — things the
+# grid search fundamentally can't do. Train/val split by date protects against
+# overfitting.
+print()
+print('='*68)
+print('  LOGISTIC REGRESSION FIT')
+print('='*68)
 
-    # Convert one date's precomputed rows into a dict of numpy arrays.
-    # Tuple layout (matches _precompute_row return):
-    #   0:bid  1:pk  2:away  3:home  4:rate  5:raw_vuln  6:park  7:platoon
-    #   8:brl_ratio  9:ev_ratio  10:hh_f  11:bt_f  12:norm_rv
-    #   13:wx_f  14:st_f  15:r_pa  16:r_hr  17:season_hr  18:season_pa
-    #   19:pit_rf  20:ha_f  21:raw_bvp  22:name  23:wx_hist_f
-    def _rows_to_np(rows):
-        if not rows:
-            return None
-        cols    = list(zip(*rows))
-        norm_rv = cols[12]
-        return {
-            'bids':      np.array(cols[0],  dtype=np.int64),
-            'pks':       np.array(cols[1],  dtype=np.int64),
-            'names':     list(cols[22]),
-            'away_t':    list(cols[2]),
-            'home_t':    list(cols[3]),
-            'rate':      np.array(cols[4],  dtype=np.float32),
-            'raw_vuln':  np.array(cols[5],  dtype=np.float32),
-            'park':      np.array(cols[6],  dtype=np.float32),
-            'platoon':   np.array(cols[7],  dtype=np.float32),
-            'brl_ratio': np.array(cols[8],  dtype=np.float32),
-            'ev_ratio':  np.array(cols[9],  dtype=np.float32),
-            'hh_f':      np.array(cols[10], dtype=np.float32),
-            'bt_f':      np.array(cols[11], dtype=np.float32),
-            'norm_rv':   np.array([v if v is not None else 0.0 for v in norm_rv],
-                                  dtype=np.float32),
-            'has_norm':  np.array([v is not None for v in norm_rv], dtype=np.bool_),
-            'wx_f':      np.array(cols[13], dtype=np.float32),
-            'st_f':      np.array(cols[14], dtype=np.float32),
-            'r_pa':      np.array(cols[15], dtype=np.float32),
-            'r_hr':      np.array(cols[16], dtype=np.float32),
-            'season_hr': np.array(cols[17], dtype=np.float32),
-            'season_pa': np.array(cols[18], dtype=np.float32),
-            'pit_rf':    np.array(cols[19], dtype=np.float32),
-            'ha_f':      np.array(cols[20], dtype=np.float32),
-            'raw_bvp':   np.array(cols[21], dtype=np.float32),
-            'wx_hist_f': np.array(cols[23], dtype=np.float32),
-        }
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
+except ImportError as _e:
+    raise SystemExit(f'sklearn required: pip install scikit-learn ({_e})')
 
-    # Build per-date numpy arrays + eligible-row game groups + actual-HR labels
-    date_arrs       = {}   # {date: dict of np arrays}
-    date_gmeta      = {}   # {date: {pk: np.array of eligible row indices}}
-    date_actual_arr = {}   # {date: np.int8, 1 if batter hit a HR that day}
+# Train/validation split — last VAL_DAYS dates held out
+VAL_DAYS    = 5
+train_dates = TEST_DATES[:-VAL_DAYS]
+val_dates   = TEST_DATES[-VAL_DAYS:]
+print(f'  Train dates: {train_dates[0]} .. {train_dates[-1]}  ({len(train_dates)} days)')
+print(f'  Val   dates: {val_dates[0]} .. {val_dates[-1]}  ({len(val_dates)} days)')
 
-    for date_str in TEST_DATES:
-        dc   = date_cache[date_str]
-        arrs = _rows_to_np(precomputed_rows[date_str])
-        date_arrs[date_str] = arrs
-        if arrs is None:
-            date_gmeta[date_str]      = {}
-            date_actual_arr[date_str] = np.zeros(0, dtype=np.int8)
-            continue
+# Feature list — each log-factor becomes an additive term in log-odds space.
+FEATURE_NAMES = [
+    'log_rate','log_vuln','log_park','log_platoon',
+    'log_brl','log_ev','log_hh','log_bt',
+    'norm_rv','has_norm',
+    'log_wx','log_st','log_pitrf','log_ha',
+    'log_bvp','log_wxhist',
+    'log_form','has_form',
+    'log_pa',
+]
 
-        N        = len(arrs['bids'])
-        prev_hr  = dc['prev_hr_hitters']
-        actual   = dc['actual']
-        eligible = np.array([int(b) not in prev_hr for b in arrs['bids']], dtype=np.bool_)
-        date_actual_arr[date_str] = np.array(
-            [1 if actual.get(int(b), {}).get('hrs', 0) > 0 else 0
-             for b in arrs['bids']], dtype=np.int8)
+def _row_features(row):
+    """Turn one _precompute_row tuple into a feature vector."""
+    (bid, pk, away_team, home_team,
+     rate, raw_vuln, park, platoon,
+     brl_ratio, ev_ratio, hh_f,
+     bt_f, norm_rv, wx_f, st_f,
+     r_pa, r_hr, season_hr, season_pa,
+     pit_rf, ha_f, raw_bvp, name, wx_hist_f) = row
+    vuln_capped = max(min(raw_vuln, 3.0), 0.1)
+    if r_pa > 0 and season_hr > 0 and season_pa > 0:
+        season_rate = season_hr / season_pa
+        recent_rate = r_hr / r_pa
+        form_ratio  = max(min(recent_rate / season_rate, 4.0), 0.25) if season_rate > 0 else 1.0
+        has_form    = 1.0
+    else:
+        form_ratio = 1.0
+        has_form   = 0.0
+    return [
+        math.log(max(rate,         1e-5)),
+        math.log(max(vuln_capped,  1e-3)),
+        math.log(max(park,         1e-3)),
+        math.log(max(platoon,      1e-3)),
+        math.log(max(brl_ratio,    1e-3)),
+        math.log(max(ev_ratio,     1e-3)),
+        math.log(max(hh_f,         1e-3)),
+        math.log(max(bt_f,         1e-3)),
+        float(norm_rv if norm_rv is not None else 0.0),
+        1.0 if norm_rv is not None else 0.0,
+        math.log(max(wx_f,         1e-3)),
+        math.log(max(st_f,         1e-3)),
+        math.log(max(pit_rf,       1e-3)),
+        math.log(max(ha_f,         1e-3)),
+        math.log(max(raw_bvp,      1e-3)),
+        math.log(max(wx_hist_f,    1e-3)),
+        math.log(max(form_ratio,   1e-3)),
+        has_form,
+        math.log(max(season_pa,    1.0)),
+    ]
 
-        game_elig = {}
-        for i in range(N):
-            if eligible[i]:
-                pk_i = int(arrs['pks'][i])
-                if pk_i not in game_elig:
-                    game_elig[pk_i] = []
-                game_elig[pk_i].append(i)
-        date_gmeta[date_str] = {pk: np.array(v) for pk, v in game_elig.items()}
-
-    # Config parameter arrays (n_configs,) float32
-    _cfgk    = ['vuln_cap','pwr_brl_exp','pwr_ev_exp','matchup_scale',
-                 'form_min_pa','form_cap_hi','bvp_weight','calibration']
-    cfg_np   = {k: np.array([c[k] for c in ALL_TUNE_CONFIGS], dtype=np.float32)
-                for k in _cfgk}
-    cfg_skip = np.array([c['picks_skip'] for c in ALL_TUNE_CONFIGS], dtype=np.int32)
-
-    # Upload static row arrays to GPU once — they stay resident across all batches
-    date_gpu = {}
-    _row_keys = ('rate','raw_vuln','park','platoon','brl_ratio','ev_ratio','hh_f',
-                 'bt_f','norm_rv','has_norm','wx_f','st_f','r_pa','r_hr',
-                 'season_hr','season_pa','pit_rf','ha_f','raw_bvp','wx_hist_f')
-    for date_str in TEST_DATES:
-        arrs = date_arrs[date_str]
-        date_gpu[date_str] = (
-            {k: xp.asarray(arrs[k]) for k in _row_keys} if arrs is not None else None
-        )
-
-    # Scalar caps as Python floats (avoids repeated attribute lookups in inner loop)
-    _pmc0  = float(PITCH_MATCHUP_CAP[0]);  _pmc1 = float(PITCH_MATCHUP_CAP[1])
-    _pc0   = float(POWER_CAP[0]);          _pc1  = float(POWER_CAP[1])
-    _rfc0  = float(RECENT_FORM_CAP[0])
-    _avpa  = float(AVG_PA_GAME)
-
-    # ── GPU grid search ────────────────────────────────────────────────────────────
-    # BATCH_SIZE: configs processed per GPU kernel launch.
-    # Lower if you hit OOM; A100-80 GB can handle 100_000+ comfortably.
-    BATCH_SIZE   = 50_000
-    n_configs    = len(ALL_TUNE_CONFIGS)
-    n_dates      = len(TEST_DATES)
-    all_avg_prec  = np.zeros(n_configs, dtype=np.float64)
-    all_date_prec = np.zeros((n_configs, n_dates), dtype=np.float32)
-
-    for batch_start in range(0, n_configs, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, n_configs)
-        B         = batch_end - batch_start
-
-        # Config arrays shaped (B, 1) so they broadcast against row arrays (N,)
-        def _gc(k):
-            return xp.asarray(cfg_np[k][batch_start:batch_end, np.newaxis])
-        g_vc  = _gc('vuln_cap')
-        g_bre = _gc('pwr_brl_exp')
-        g_eve = _gc('pwr_ev_exp')
-        g_ms  = _gc('matchup_scale')
-        g_fpa = _gc('form_min_pa')
-        g_fch = _gc('form_cap_hi')
-        g_bvw = _gc('bvp_weight')
-        g_cal = _gc('calibration')
-        skip_b = cfg_skip[batch_start:batch_end]   # (B,) CPU int32
-
-        batch_hits  = np.zeros((B, n_dates), dtype=np.int32)
-        batch_npick = np.zeros((B, n_dates), dtype=np.int32)
-
-        for di, date_str in enumerate(TEST_DATES):
-            garrs = date_gpu[date_str]
-            if garrs is None:
-                continue
-
-            # ── Score every (config, row) pair on GPU in one broadcast kernel ─────
-            vuln  = xp.minimum(garrs['raw_vuln'], g_vc)                    # (B, N)
-            brl_f = garrs['brl_ratio'] ** g_bre                             # (B, N)
-            ev_f  = garrs['ev_ratio']  ** g_eve                             # (B, N)
-            pwr_f = xp.clip(brl_f * ev_f * garrs['hh_f'], _pc0, _pc1)     # (B, N)
-
-            pm_raw = xp.exp(garrs['norm_rv'] * g_ms)                       # (B, N)
-            pm_f   = xp.where(garrs['has_norm'],
-                              xp.clip(pm_raw, _pmc0, _pmc1), 1.0)          # (B, N)
-
-            # Recent form — vectorised conditional
-            sr     = garrs['season_hr'] / xp.maximum(garrs['season_pa'], 1e-6)
-            rr     = xp.where(garrs['r_pa'] > 0,
-                              garrs['r_hr'] / xp.maximum(garrs['r_pa'], 1e-6), 0.0)
-            raw_f  = xp.where(sr > 0, rr / xp.maximum(sr, 1e-6), 1.0)
-            conf_f = xp.minimum(garrs['r_pa'], 60.0) / 60.0
-            blend  = conf_f * raw_f + (1.0 - conf_f)
-            active = ((garrs['r_pa'] >= g_fpa) &
-                      (garrs['season_hr'] > 0) &
-                      (garrs['season_pa'] > 0))                             # (B, N)
-            form_f = xp.where(active, xp.clip(blend, _rfc0, g_fch), 1.0)  # (B, N)
-
-            bvp_f  = 1.0 + g_bvw * (garrs['raw_bvp'] - 1.0)               # (B, N)
-            exp_hr = (garrs['rate'] * vuln * garrs['park'] * garrs['platoon']
-                      * pwr_f * garrs['bt_f'] * pm_f
-                      * garrs['wx_f'] * garrs['st_f'] * form_f
-                      * garrs['pit_rf'] * bvp_f * garrs['ha_f']
-                      * garrs['wx_hist_f']
-                      * _avpa * g_cal)                                      # (B, N)
-            hr_prob = 1.0 - xp.exp(-exp_hr)                                # (B, N)
-
-            # Transfer result to CPU (no-op when xp is np)
-            hp = xp.asnumpy(hr_prob) if xp is not np else hr_prob          # (B, N)
-
-            # ── Vectorised pick selection (CPU NumPy, per game per picks_skip) ────
-            gmeta      = date_gmeta[date_str]
-            actual_arr = date_actual_arr[date_str]
-
-            for s in range(4):                        # picks_skip ∈ {0,1,2,3}
-                cmask = (skip_b == s)
-                if not cmask.any():
-                    continue
-                Bs   = int(cmask.sum())
-                hp_s = hp[cmask, :]                   # (Bs, N)
-                hits_s = np.zeros(Bs, dtype=np.int32)
-                nps    = 0
-
-                for elig_idx in gmeta.values():
-                    n_elig = len(elig_idx)
-                    if n_elig <= s:
-                        continue
-                    take = min(PICKS_TAKE, n_elig - s)
-                    need = s + take
-
-                    probs = hp_s[:, elig_idx]                              # (Bs, n_elig)
-                    # argpartition is O(n) vs argsort O(n log n) — faster for large n_elig
-                    kth   = min(need, n_elig) - 1
-                    top   = np.argpartition(-probs, kth, axis=1)[:, :need] # (Bs, need)
-                    tp    = probs[np.arange(Bs)[:, None], top]             # (Bs, need)
-                    order = np.argsort(-tp, axis=1)[:, s:s + take]        # (Bs, take)
-                    sel   = top[np.arange(Bs)[:, None], order]             # (Bs, take)
-                    sel_g = elig_idx[sel]                                  # (Bs, take)
-
-                    hits_s += actual_arr[sel_g].sum(axis=1)
-                    nps    += take
-
-                batch_hits[cmask, di]  += hits_s
-                batch_npick[cmask, di] += nps
-
-        prec = np.where(batch_npick > 0,
-                        batch_hits / np.maximum(batch_npick, 1), 0.0)
-        all_avg_prec[batch_start:batch_end]     = prec.mean(axis=1)
-        all_date_prec[batch_start:batch_end, :] = prec.astype(np.float32)
-
-        done = batch_end
-        if done % 200_000 < BATCH_SIZE or done == n_configs:
-            print(f'  {done:>8,}/{n_configs:,} done   '
-                  f'best so far: {all_avg_prec[:done].max():.1%}')
-
-    # ── Sort and build grid_results ───────────────────────────────────────────────
-    sorted_ci = np.argsort(-all_avg_prec)
-    grid_results = []
-    for rank_i in sorted_ci[:20]:
-        grid_results.append({
-            'cfg':          ALL_TUNE_CONFIGS[int(rank_i)],
-            'avg_prec':     float(all_avg_prec[rank_i]),
-            'per_date_prec': {d: round(float(all_date_prec[rank_i, di]), 3)
-                              for di, d in enumerate(TEST_DATES)},
-            'date_picks':   {},   # filled for best config below
-        })
-
-    # Re-run the best config once (fast single-config Python loop) to collect picks
-    _best_cfg = grid_results[0]['cfg']
-    _best_date_picks = {}
-    for date_str in TEST_DATES:
-        dc      = date_cache[date_str]
-        prev_hr = dc['prev_hr_hitters']
-        _picks  = {}
+def _build_matrix(date_list):
+    X, y, meta = [], [], []
+    for date_str in date_list:
+        dc     = date_cache[date_str]
+        actual = dc['actual']
         for row in precomputed_rows[date_str]:
-            (bid, pk, away_team, home_team,
-             rate, raw_vuln, park, platoon,
-             brl_ratio, ev_ratio, hh_f,
-             bt_f, norm_rv, wx_f, st_f,
-             r_pa, r_hr, season_hr, season_pa,
-             pit_rf, ha_f, raw_bvp, name, wx_hist_f) = row
-            vuln  = min(raw_vuln, _best_cfg['vuln_cap'])
-            brl_f = brl_ratio ** _best_cfg['pwr_brl_exp']
-            ev_f  = ev_ratio  ** _best_cfg['pwr_ev_exp']
-            pwr_f = max(min(brl_f * ev_f * hh_f, POWER_CAP[1]), POWER_CAP[0])
-            pm_f  = (max(min(math.exp(norm_rv * _best_cfg['matchup_scale']),
-                             PITCH_MATCHUP_CAP[1]), PITCH_MATCHUP_CAP[0])
-                     if norm_rv is not None else 1.0)
-            if r_pa >= _best_cfg['form_min_pa'] and season_hr > 0 and season_pa > 0:
-                sr     = season_hr / season_pa
-                raw_f  = (r_hr / r_pa) / sr if sr > 0 and r_pa > 0 else 1.0
-                conf_f = min(r_pa, 60) / 60
-                form_f = max(min(conf_f * raw_f + (1 - conf_f),
-                                 _best_cfg['form_cap_hi']), RECENT_FORM_CAP[0])
-            else:
-                form_f = 1.0
-            bvp_f  = 1.0 + _best_cfg['bvp_weight'] * (raw_bvp - 1.0)
-            exp_hr = (rate * vuln * park * platoon * pwr_f * bt_f * pm_f
-                      * wx_f * st_f * form_f * pit_rf * bvp_f * ha_f
-                      * wx_hist_f * AVG_PA_GAME * _best_cfg['calibration'])
-            hr_prob = 1 - math.exp(-exp_hr)
-            _picks.setdefault(pk, []).append({
-                'batter_id': bid, 'name': name, 'hr_prob': round(hr_prob, 4),
-                'game_pk': pk, 'home_team': home_team, 'away_team': away_team,
-            })
-        _day = []
-        for pk, game_rows in _picks.items():
-            elig = [r for r in game_rows if r['batter_id'] not in prev_hr]
-            elig.sort(key=lambda x: -x['hr_prob'])
-            skip = _best_cfg['picks_skip']
-            _day.extend(elig[skip:skip + PICKS_TAKE])
-        _best_date_picks[date_str] = _day
-    grid_results[0]['date_picks'] = _best_date_picks
-    save_cache(_grid_key, (all_avg_prec, all_date_prec, grid_results))
-    print(f'  Grid results saved to cache  [{_grid_key}]')
+            bid = int(row[0])
+            pk  = row[1]
+            X.append(_row_features(row))
+            y.append(1 if actual.get(bid, {}).get('hrs', 0) > 0 else 0)
+            meta.append((date_str, bid, pk, row))
+    return np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.int64), meta
 
-# ── 4. Results ────────────────────────────────────────────────────────────────
-grid_results.sort(key=lambda x: -x['avg_prec'])
-best  = grid_results[0]
-best_cfg = best['cfg']
+X_tr, y_tr, meta_tr = _build_matrix(train_dates)
+X_va, y_va, meta_va = _build_matrix(val_dates)
+print(f'  Train rows: {len(X_tr):,}   HR rate: {y_tr.mean():.3%}')
+print(f'  Val   rows: {len(X_va):,}   HR rate: {y_va.mean():.3%}')
 
+# Standardize features on train, apply same transform to val.
+scaler = StandardScaler()
+X_tr_s = scaler.fit_transform(X_tr)
+X_va_s = scaler.transform(X_va)
+
+# Sweep a small L2 grid; pick by val log-loss.
+print()
+print(f"  {'C':>6}  {'train_ll':>10}  {'val_ll':>10}  "
+      f"{'train_AUC':>10}  {'val_AUC':>10}  {'val_Brier':>10}")
+print('  ' + '-'*68)
+best = None
+for C in [0.03, 0.1, 0.3, 1.0, 3.0, 10.0]:
+    lr = LogisticRegression(C=C, max_iter=1000, solver='lbfgs')
+    lr.fit(X_tr_s, y_tr)
+    p_tr = lr.predict_proba(X_tr_s)[:, 1]
+    p_va = lr.predict_proba(X_va_s)[:, 1]
+    ll_tr  = log_loss(y_tr, p_tr, labels=[0, 1])
+    ll_va  = log_loss(y_va, p_va, labels=[0, 1])
+    auc_tr = roc_auc_score(y_tr, p_tr) if y_tr.sum() > 0 else float('nan')
+    auc_va = roc_auc_score(y_va, p_va) if y_va.sum() > 0 else float('nan')
+    br_tr  = brier_score_loss(y_tr, p_tr)
+    br_va  = brier_score_loss(y_va, p_va)
+    print(f'  {C:>6}  {ll_tr:>10.4f}  {ll_va:>10.4f}  '
+          f'{auc_tr:>10.3f}  {auc_va:>10.3f}  {br_va:>10.4f}')
+    if best is None or ll_va < best['ll_va']:
+        best = {'C': C, 'model': lr, 'p_tr': p_tr, 'p_va': p_va,
+                'll_tr': ll_tr, 'll_va': ll_va,
+                'auc_tr': auc_tr, 'auc_va': auc_va,
+                'br_tr': br_tr,  'br_va': br_va}
+
+model = best['model']
+print()
+print(f"  Best C = {best['C']}  (chosen by val log-loss)")
+
+# ── 5. Results ────────────────────────────────────────────────────────────────
 print()
 print('='*68)
-print(f'  TOP 20 CONFIGS  (top {PICKS_PER_GAME} picks/game, {len(TEST_DATES)} dates)')
+print('  RESULTS')
 print('='*68)
-print(f"  {'Rank':<5} {'Prec':>7}  Config")
-print(f"  {'-'*68}")
-for i, r in enumerate(grid_results[:20], 1):
-    c = r['cfg']
-    desc = (f"brl={c['pwr_brl_exp']} ev={c['pwr_ev_exp']} "
-            f"form_cap={c['form_cap_hi']} form_pa={c['form_min_pa']} "
-            f"vuln={c['vuln_cap']} mtch={c['matchup_scale']} "
-            f"bvp={c['bvp_weight']}")
-    print(f"  {i:<5} {r['avg_prec']:>6.1%}  {desc}")
+print(f"  Train   log-loss = {best['ll_tr']:.4f}   AUC = {best['auc_tr']:.3f}   Brier = {best['br_tr']:.4f}")
+print(f"  Val     log-loss = {best['ll_va']:.4f}   AUC = {best['auc_va']:.3f}   Brier = {best['br_va']:.4f}")
+
+# Standardized coefficients — magnitude = relative importance, sign = direction.
+print()
+print('  Feature weights (standardized; larger |w| = more influential):')
+coefs = model.coef_[0]
+order = np.argsort(-np.abs(coefs))
+for j in order:
+    bar = '█' * int(min(abs(coefs[j]) * 20, 40))
+    print(f"    {FEATURE_NAMES[j]:<12} {coefs[j]:+.3f}  {bar}")
+print(f"    {'intercept':<12} {model.intercept_[0]:+.3f}")
+
+# Per-date precision @ top picks (val) using the same PICKS_SKIP / PICKS_TAKE
+# convention as the old script, and excluding batters who HR'd the previous day.
+PICKS_SKIP = 1
+PICKS_TAKE = 2
+
+p_va_by_date = {}
+for i, (ds, bid, pk, row) in enumerate(meta_va):
+    p_va_by_date.setdefault(ds, []).append((i, bid, pk, row))
 
 print()
-print('  BEST CONFIG:')
-for k, v in best_cfg.items():
-    print(f"    {k:<20} = {v}")
-print(f"  Avg precision: {best['avg_prec']:.1%}")
-
-print()
-print('  Per-date precision (best config):')
+print(f'  Per-date precision @ top-{PICKS_TAKE} per game  (skip {PICKS_SKIP})  — VAL:')
 print(f"  {'Date':<12} {'Picks':>6} {'Hits':>6} {'Prec':>7}  {'Actual HRs':>10}")
-print(f"  {'-'*48}")
-for date_str in TEST_DATES:
-    picks  = best['date_picks'][date_str]
+print('  ' + '-'*48)
+all_picks_by_date = {}
+for ds in val_dates:
+    dc      = date_cache[ds]
+    prev_hr = dc['prev_hr_hitters']
+    per_game = {}
+    for i, bid, pk, row in p_va_by_date.get(ds, []):
+        if bid in prev_hr:
+            continue
+        per_game.setdefault(pk, []).append({
+            'batter_id': bid, 'name': row[22],
+            'home_team': row[3], 'away_team': row[2],
+            'game_pk':   pk,
+            'hr_prob':   float(best['p_va'][i]),
+        })
+    picks = []
+    for pk, grp in per_game.items():
+        grp.sort(key=lambda x: -x['hr_prob'])
+        picks.extend(grp[PICKS_SKIP:PICKS_SKIP + PICKS_TAKE])
     n_hits = sum(1 for p in picks
-                 if date_cache[date_str]['actual'].get(p['batter_id'], {}).get('hrs', 0) > 0)
+                 if dc['actual'].get(p['batter_id'], {}).get('hrs', 0) > 0)
     pr    = n_hits / len(picks) if picks else 0.0
-    n_act = len(date_cache[date_str]['actual'])
-    print(f"  {date_str:<12} {len(picks):>6} {n_hits:>6} {pr:>6.0%}  {n_act:>10}")
+    n_act = len(dc['actual'])
+    print(f'  {ds:<12} {len(picks):>6} {n_hits:>6} {pr:>6.0%}  {n_act:>10}')
+    all_picks_by_date[ds] = picks
 
-print()
-print(f'  Per-game picks — {TEST_DATES[-1]} (best config):')
-last_date  = TEST_DATES[-1]
-last_picks = best['date_picks'][last_date]
+total_picks = sum(len(v) for v in all_picks_by_date.values())
+total_hits  = sum(1 for ds, picks in all_picks_by_date.items() for p in picks
+                  if date_cache[ds]['actual'].get(p['batter_id'], {}).get('hrs', 0) > 0)
+print('  ' + '-'*48)
+print(f'  {"TOTAL":<12} {total_picks:>6} {total_hits:>6} '
+      f'{(total_hits/total_picks if total_picks else 0):>6.0%}')
+
+# Per-game picks for the last validation date
+last_date  = val_dates[-1]
+last_picks = all_picks_by_date[last_date]
 last_dc    = date_cache[last_date]
+print()
+print(f'  Per-game picks — {last_date} (logreg model):')
 print(f"  {'Matchup':<34} {'Player':<24} {'prob':>6}  Hit?")
-print(f"  {'-'*72}")
+print('  ' + '-'*72)
 for p in sorted(last_picks, key=lambda x: (x['game_pk'], -x['hr_prob'])):
     hit     = last_dc['actual'].get(p['batter_id'], {}).get('hrs', 0) > 0
     matchup = f"{p['away_team']} @ {p['home_team']}"
     print(f"  {matchup:<34} {p['name']:<24} {p['hr_prob']:>5.1%}  {'YES' if hit else '---'}")
+
+# Cache fitted model + scaler for reuse / inference.
+save_cache('logreg_model', {
+    'scaler': scaler, 'model': model, 'C': best['C'],
+    'feature_names': FEATURE_NAMES,
+    'train_dates':   train_dates,
+    'val_dates':     val_dates,
+    'metrics': {k: best[k] for k in ('ll_tr','ll_va','auc_tr','auc_va','br_tr','br_va')},
+})
+print()
+print('  Fitted model + scaler cached as logreg_model.pkl')

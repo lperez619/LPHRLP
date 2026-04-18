@@ -44,8 +44,9 @@ DAY_GAME_CUTOFF  = 18        # before 18:00 UTC → day game
 
 SPRING_START = '2026-02-20'
 SPRING_END   = '2026-03-25'
-SPRING_CACHE = '/content/drive/MyDrive/hr_prediction/spring_2026_cache.json'
-CACHE_DIR    = '/content/drive/MyDrive/hr_prediction/cache'
+_SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+SPRING_CACHE = os.path.join(_SCRIPT_DIR, 'spring_2026_cache.json')
+CACHE_DIR    = _SCRIPT_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 PITCH_MATCHUP_CAP = (0.70, 1.40)
@@ -720,7 +721,7 @@ def fetch_weather(games, date_str):
 
 def fetch_spring_stats():
     if os.path.exists(SPRING_CACHE):
-        with open(SPRING_CACHE) as f:
+        with open(SPRING_CACHE, encoding='utf-8') as f:
             data = json.load(f)
         print(f'  Spring cache: {len(data)} players')
         return {int(k): v for k, v in data.items()}
@@ -760,7 +761,7 @@ def fetch_spring_stats():
                     stats[pid] = row
 
     os.makedirs(os.path.dirname(SPRING_CACHE), exist_ok=True)
-    with open(SPRING_CACHE, 'w') as f:
+    with open(SPRING_CACHE, 'w', encoding='utf-8') as f:
         json.dump({str(k): v for k, v in stats.items()}, f)
     print(f'  Cached spring: {len(stats)} players')
     return stats
@@ -1392,7 +1393,7 @@ print('='*68)
 print()
 
 PICKS_SKIP  = 1   # skip this many top-ranked players per game
-PICKS_TAKE  = 2   # then take this many
+PICKS_TAKE  = 10  # then take this many
 PICKS_PER_GAME = PICKS_TAKE
 
 # Pre-build batter_stats and dn_park once (single season/pf config)
@@ -1450,14 +1451,9 @@ if _grid_cache is not None:
     all_avg_prec, all_date_prec, grid_results = _grid_cache
     print(f'  Loaded {len(ALL_TUNE_CONFIGS):,}-config grid results from cache  [{_grid_key}]')
 else:
-    # ── GPU / vectorised setup ─────────────────────────────────────────────────────
-    try:
-        import cupy as cp
-        xp = cp
-        print(f'  Device: GPU (CuPy {cp.__version__})')
-    except ImportError:
-        xp = np
-        print('  Device: CPU NumPy — pip install cupy-cuda12x to use A100')
+    # ── Vectorised setup ─────────────────────────────────────────────────────
+    xp = np
+    print('  Device: CPU NumPy')
 
     # Convert one date's precomputed rows into a dict of numpy arrays.
     # Tuple layout (matches _precompute_row return):
@@ -1537,7 +1533,7 @@ else:
                 for k in _cfgk}
     cfg_skip = np.array([c['picks_skip'] for c in ALL_TUNE_CONFIGS], dtype=np.int32)
 
-    # Upload static row arrays to GPU once — they stay resident across all batches
+    # Upload static row arrays once — they stay resident across all batches
     date_gpu = {}
     _row_keys = ('rate','raw_vuln','park','platoon','brl_ratio','ev_ratio','hh_f',
                  'bt_f','norm_rv','has_norm','wx_f','st_f','r_pa','r_hr',
@@ -1554,9 +1550,7 @@ else:
     _rfc0  = float(RECENT_FORM_CAP[0])
     _avpa  = float(AVG_PA_GAME)
 
-    # ── GPU grid search ────────────────────────────────────────────────────────────
-    # BATCH_SIZE: configs processed per GPU kernel launch.
-    # Lower if you hit OOM; A100-80 GB can handle 100_000+ comfortably.
+    # ── Vectorised grid search ──────────────────────────────────────────────────
     BATCH_SIZE   = 50_000
     n_configs    = len(ALL_TUNE_CONFIGS)
     n_dates      = len(TEST_DATES)
@@ -1588,7 +1582,7 @@ else:
             if garrs is None:
                 continue
 
-            # ── Score every (config, row) pair on GPU in one broadcast kernel ─────
+            # ── Score every (config, row) pair in one broadcast ─────
             vuln  = xp.minimum(garrs['raw_vuln'], g_vc)                    # (B, N)
             brl_f = garrs['brl_ratio'] ** g_bre                             # (B, N)
             ev_f  = garrs['ev_ratio']  ** g_eve                             # (B, N)

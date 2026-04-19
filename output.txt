@@ -1,0 +1,258 @@
+﻿====================================================================
+  LOADING SEASON-LEVEL DATA
+====================================================================
+  Power data (barrel/exit velo/hard-hit)...
+  251 players
+  Bat tracking...
+  Bat tracking: 246 players (from cache)
+  Batter arsenal...
+  353 batters
+  Pitcher arsenal...
+  353 pitchers
+  Spring training stats...
+  Spring cache: 907 players
+  Park factors: using hardcoded 2025/2026 day/night tables
+  Career BvP lookup...
+  931 batters, 227,209 pairs
+  Weather performance splits...
+  916 batters with weather split history
+
+====================================================================
+  FETCHING PER-DATE DATA
+====================================================================
+
+  --- 2026-03-27 --- (cached)
+
+  --- 2026-03-28 --- (cached)
+
+  --- 2026-03-29 --- (cached)
+
+  --- 2026-03-30 --- (cached)
+
+  --- 2026-03-31 --- (cached)
+
+  --- 2026-04-01 --- (cached)
+
+  --- 2026-04-02 --- (cached)
+
+  --- 2026-04-03 --- (cached)
+
+  --- 2026-04-04 --- (cached)
+
+  --- 2026-04-05 --- (cached)
+
+  --- 2026-04-06 --- (cached)
+
+  --- 2026-04-07 --- (cached)
+
+  --- 2026-04-08 --- (cached)
+
+  --- 2026-04-09 --- (cached)
+
+  --- 2026-04-10 --- (cached)
+
+  --- 2026-04-11 --- (cached)
+
+  --- 2026-04-12 --- (cached)
+
+  --- 2026-04-13 --- (cached)
+
+  --- 2026-04-14 --- (cached)
+
+  --- 2026-04-15 --- (cached)
+
+  Hitting splits 2025 (all 502 batters)...
+  From cache: 504 batters
+
+====================================================================
+  FEATURE EXTRACTION + LOGISTIC REGRESSION
+====================================================================
+
+  Building 2026 starters list from starting lineups...
+  421 unique starters found across 20 dates
+  Pre-computing invariant row factors (starters only)...
+    2026-03-27: 144 eligible rows
+    2026-03-28: 270 eligible rows
+    2026-03-29: 214 eligible rows
+    2026-03-30: 269 eligible rows
+    2026-03-31: 252 eligible rows
+    2026-04-01: 270 eligible rows
+    2026-04-02: 75 eligible rows
+    2026-04-03: 276 eligible rows
+    2026-04-04: 295 eligible rows
+    2026-04-05: 286 eligible rows
+    2026-04-06: 234 eligible rows
+    2026-04-07: 266 eligible rows
+    2026-04-08: 270 eligible rows
+    2026-04-09: 107 eligible rows
+    2026-04-10: 267 eligible rows
+    2026-04-11: 266 eligible rows
+    2026-04-12: 263 eligible rows
+    2026-04-13: 180 eligible rows
+    2026-04-14: 264 eligible rows
+    2026-04-15: 264 eligible rows
+
+  Building 2026 feature matrices...
+  2026 validation: 4732 rows, 480 HRs (10.1%)
+  Core features: 12, Adj features: 7, All features: 19
+
+  Loading historical training data...
+  2024: loaded from cache ΓÇö 48337 rows, 5116 HRs (10.6%)
+  2025: loaded from cache ΓÇö 48382 rows, 5265 HRs (10.9%)
+  Historical training set: 96719 rows, 10381 HRs (10.7%)
+
+====================================================================
+  MODEL TRAINING
+====================================================================
+
+  [Mode A] TRAIN on 2024+2025 core features (12-dim) -> +adj offsets on 2026
+    Best C = 0.2336
+    Core-only AUC: 0.5411  -> +adj AUC: 0.5974  LL: 0.3538
+
+  [Mode C] Leave-one-date-out CV on 2026 ΓÇö LogReg, ALL 19 features
+    CV AUC: 0.8098  LL: 0.2603
+    Final model C = 0.3162
+
+  [Mode D] Leave-one-date-out CV on 2026 ΓÇö GBM, ALL 19 features
+    CV AUC: 0.8095  LL: 0.4607
+
+  [Mode E] Ensemble (LogReg+GBM average):
+    CV AUC: 0.8151  LL: 0.3168
+
+  MODE COMPARISON:
+    Mode A (hist core + adj):  AUC=0.5974  LL=0.3538
+    Mode C (LogReg 2026 CV):   AUC=0.8098  LL=0.2603
+    Mode D (GBM 2026 CV):      AUC=0.8095  LL=0.4607
+    Mode E (Ensemble CV):      AUC=0.8151  LL=0.3168
+  >> Using Mode E (Ensemble (LogReg+GBM))
+
+====================================================================
+  MODEL DIAGNOSTICS  (Mode E)
+====================================================================
+
+  LogReg coefficients (Mode C):
+  Feature              Coef    |Coef|  Direction
+  ----------------------------------------------------
+  log_rate           1.6313    1.6313  + HR
+  log_bvp            0.8455    0.8455  + HR
+  log_park           0.3497    0.3497  + HR
+  log_platoon       -0.2716    0.2716  - HR
+  rate_x_park        0.2388    0.2388  + HR
+  log_dn_bat        -0.2387    0.2387  - HR
+  log_ha            -0.2374    0.2374  - HR
+  has_norm_rv       -0.2368    0.2368  - HR
+  log_bt             0.1979    0.1979  + HR
+  log_wx_hist        0.1664    0.1664  + HR
+  log_wx             0.1447    0.1447  + HR
+  log_vuln          -0.0931    0.0931  - HR
+  lineup_pos        -0.0716    0.0716  - HR
+  log_power         -0.0493    0.0493  - HR
+  norm_rv           -0.0361    0.0361  - HR
+  rate_x_vuln       -0.0300    0.0300  - HR
+  log_pit_rf         0.0000    0.0000  - HR
+  log_st             0.0000    0.0000  - HR
+  log_form           0.0000    0.0000  - HR
+  intercept         -2.8674
+
+  GBM feature importance (Mode D):
+
+  (GBM feature importances not available in this sklearn version)
+
+====================================================================
+  EVALUATION METRICS  (Mode E, 2026 validation)
+====================================================================
+  Log-loss:     0.3168
+  AUC-ROC:      0.8151
+  Brier score:  0.090803
+  HR base rate: 10.144% (480/4732)
+
+  Calibration (predicted probability bins):
+  Bin           Count    Pred%  Actual%
+  --------------------------------------
+  [0.00,0.02)      61   1.57%   1.64%
+  [0.02,0.04)     238   3.06%   0.84%
+  [0.04,0.06)     359   5.01%   2.51%
+  [0.06,0.08)     361   7.01%   1.66%
+  [0.08,0.12)     669   9.99%   1.94%
+  [0.12,0.20)    1094  15.89%   5.12%
+  [0.20,1.00)    1950  38.08%  20.15%
+
+====================================================================
+  PER-GAME PICK GRID  (skip ├ù take, 20 dates)
+====================================================================
+   Skip  Take   Picks   Hits    Prec
+  -----------------------------------
+      0     3     792    257  32.4% <-- BEST
+      0     5    1320    336  25.5%
+      1     3     792    187  23.6%
+      0     7    1848    371  20.1%
+      1     5    1320    239  18.1%
+      2     3     792    131  16.5%
+      0    10    2640    404  15.3%
+      1     7    1848    268  14.5%
+      3     3     792    102  12.9%
+      2     5    1320    166  12.6%
+      1    10    2640    288  10.9%
+      2     7    1848    194  10.5%
+      3     5    1320    131   9.9%
+      3     7    1848    147   8.0%
+      2    10    2640    207   7.8%
+      3    10    2638    156   5.9%
+
+====================================================================
+  GLOBAL RANKING GRID  (top-N across all games, 20 dates)
+====================================================================
+   Top-N   Picks   Hits    Prec
+  ------------------------------
+      10     200    114  57.0% <-- BEST
+      15     300    154  51.3%
+      20     400    191  47.8%
+      25     500    221  44.2%
+      30     600    240  40.0%
+      40     800    273  34.1%
+      50    1000    308  30.8%
+
+  Global top-10 (57.0%) beats per-game skip=0/take=3 (32.4%)
+
+====================================================================
+  PER-DATE RESULTS  (global top-10)
+====================================================================
+  Date          Picks   Hits    Prec  Actual HRs    Log-loss
+  ------------------------------------------------------------
+  2026-03-27       10      8    80%          16      0.2659
+  2026-03-28       10      6    60%          26      0.3145
+  2026-03-29       10      6    60%          28      0.3360
+  2026-03-30       10      6    60%          27      0.3243
+  2026-03-31       10      5    50%          27      0.3381
+  2026-04-01       10      7    70%          29      0.3347
+  2026-04-02       10      5    50%          11      0.3032
+  2026-04-03       10      6    60%          31      0.3138
+  2026-04-04       10      2    20%          21      0.2913
+  2026-04-05       10      6    60%          30      0.3385
+  2026-04-06       10      4    40%          28      0.3441
+  2026-04-07       10      6    60%          17      0.2506
+  2026-04-08       10      3    30%          11      0.2589
+  2026-04-09       10      3    30%           5      0.2113
+  2026-04-10       10      6    60%          31      0.3328
+  2026-04-11       10      6    60%          31      0.3130
+  2026-04-12       10      7    70%          34      0.3468
+  2026-04-13       10      5    50%          28      0.3789
+  2026-04-14       10      7    70%          31      0.3454
+  2026-04-15       10     10   100%          35      0.3280
+
+  Per-game picks ΓÇö 2026-04-15 (global top-10):
+  Matchup                            Player                    P(HR)  Hit?
+  ------------------------------------------------------------------------
+  Seattle Mariners @ San Diego Padres Xander Bogaerts          76.5%  YES
+  Chicago Cubs @ Philadelphia Phillies Trea Turner              74.5%  YES
+  Los Angeles Angels @ New York Yankees Logan O'Hoppe            78.6%  YES
+  Los Angeles Angels @ New York Yankees Adam Frazier             75.5%  YES
+  Los Angeles Angels @ New York Yankees Aaron Judge              71.2%  YES
+  Colorado Rockies @ Houston Astros  Yordan Alvarez           81.3%  YES
+  San Francisco Giants @ Cincinnati Reds Elly De La Cruz          76.2%  YES
+  Arizona Diamondbacks @ Baltimore Orioles Jeremiah Jackson         76.3%  YES
+  Miami Marlins @ Atlanta Braves     Ozzie Albies             71.6%  YES
+  Texas Rangers @ Athletics          Corey Seager             72.9%  YES
+  Cached -> hr_logreg_model.pkl
+
+  Model saved to hr_logreg_model.pkl  (Mode E, global picks)

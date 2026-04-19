@@ -40,7 +40,13 @@ LEAGUE_HARD_HIT  = 0.385
 MIN_BVP_PA       = 3     # minimum career PA vs a pitcher to use BvP data
 MIN_HA_PA        = 20    # minimum home or away PA to use home/away split
 GAME_UTC_HOUR    = 20        # ~7 PM EDT for weather index
-DAY_GAME_CUTOFF  = 18        # before 18:00 UTC → day game
+# Game time slots in Eastern Time (UTC-4 during baseball season)
+# day=12-5 PM ET (16-21 UTC), prime=6-8 PM ET (22-24/0 UTC), late=9 PM+ ET (1+ UTC)
+DAY_ET_START     = 12        # noon ET
+DAY_ET_END       = 17        # 5:59 PM ET
+PRIME_ET_START   = 18        # 6 PM ET
+PRIME_ET_END     = 20        # 8:59 PM ET
+# late = 9 PM ET through midnight+ ET
 
 SPRING_START = '2026-02-20'
 SPRING_END   = '2026-03-25'
@@ -58,6 +64,7 @@ POWER_CAP         = (0.35, 2.00)
 RECENT_FORM_CAP   = (0.25, 4.00)
 BVP_CAP           = (0.50, 2.00)
 HOME_AWAY_CAP     = (0.60, 1.75)
+DAY_NIGHT_BATTER_CAP = (0.60, 1.75)  # batter's personal day/night HR split
 WEATHER_HIST_CAP  = (0.80, 1.25)  # historical HR rate in temp/wind bucket
 
 PITCH_GROUPS = {
@@ -81,13 +88,13 @@ PF_BLEND_CONFIGS = [
 # Each key maps to a list of values to try. All combos are swept in memory
 # after data is fetched — no extra API calls per combo.
 TUNE_PARAM_GRID = {
-    'picks_skip':     [0, 1, 2, 3],         # how many top picks per game to skip
-    'pwr_brl_exp':    [0.10, 0.20, 0.35, 0],# barrel rate exponent
-    'pwr_ev_exp':     [0.15, 0.30, 0.50, 0],# exit velo exponent
-    'form_cap_hi':    [1.50, 2.00, 3.00, 0],# recent batter form cap (high)
+    'picks_skip':     [0, 1, 2, 3, 4, 5],         # how many top picks per game to skip
+    'pwr_brl_exp':    [0.10, 0.20, 0.35, 0.45, 0],# barrel rate exponent
+    'pwr_ev_exp':     [0.15, 0.20, 0.30, 0.40, 0.50, 0],# exit velo exponent
+    'form_cap_hi':    [1.00, 1.25, 1.50, 2.00, 2.25, 2.50, 3.00],# recent batter form cap (high)
     'form_min_pa':    [10, 20, 30],            # min recent PA to activate form signal
-    'vuln_cap':       [1.00, 1.10, 1.20, 1.30, 1.40, 1.50, 1.60, 1.70, 1.80, 1.90, 2.00, 2.10, 2.20],   # pitcher HR/9 vulnerability cap
-    'matchup_scale':  [0.03, 0.05, 0.08, 0.01, 0],   # pitch matchup sensitivity
+    'vuln_cap':       [0.5, 0.75, 1.00, 1.10, 1.20, 1.30, 1.40, 1.50, 1.60, 1.70, 1.80, 1.90, 2.00, 2.10, 2.20],   # pitcher HR/9 vulnerability cap
+    'matchup_scale':  [0.3, 0.4, 0.5, 0.7, 0.8, 0.2, 0.9],   # pitch matchup sensitivity
     'bvp_weight':     [0.0, 0.25, 0.5, 0.75, 1.0],    # BvP signal weight (0=off, 1=full)
     'calibration':    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # global scale
 }
@@ -306,16 +313,14 @@ def _blend_pf(pf25, pf26, w25, w26):
     return (w25 * pf25 + w26 * pf26) / total
 
 
-def build_dn_park_table(pf_blend):
+def build_park_table(pf_blend):
     """
-    Pre-compute {(team, is_day): factor} for every team in the 2025 tables.
-    pf_blend: {2025: w, 2026: w}  e.g. {2025: 0.85, 2026: 0.15}
-
-    Rules:
-      - Tampa Bay → always Tropicana 2026 values (2025 was wrong venue)
-      - Team in 2026 day/night table → blend per pf_blend
-      - Team NOT in 2026 table → 2025 value only (no blend)
+    Pre-compute {team: overall_park_factor} for every team.
+    Blends day (35%) and night (65%) park factors into a single venue multiplier.
+    The batter's personal day/prime/late performance is handled by dn_bat_f.
     """
+    DAY_WEIGHT   = 0.35   # ~35% of MLB games are day games
+    NIGHT_WEIGHT = 0.65
     w25 = pf_blend.get(2025, 1.0)
     w26 = pf_blend.get(2026, 0.0)
     table = {}
@@ -325,15 +330,14 @@ def build_dn_park_table(pf_blend):
 
     for team in all_teams:
         if 'Tampa Bay' in team:
-            table[(team, True)]  = TAMPA_PF_DAY
-            table[(team, False)] = TAMPA_PF_NIGHT
-            continue
-        # Day
-        table[(team, True)]  = _blend_pf(
-            PF_DAY_2025.get(team), PF_DAY_2026.get(team), w25, w26)
-        # Night
-        table[(team, False)] = _blend_pf(
-            PF_NIGHT_2025.get(team), PF_NIGHT_2026.get(team), w25, w26)
+            day_pf   = TAMPA_PF_DAY
+            night_pf = TAMPA_PF_NIGHT
+        else:
+            day_pf   = _blend_pf(
+                PF_DAY_2025.get(team), PF_DAY_2026.get(team), w25, w26)
+            night_pf = _blend_pf(
+                PF_NIGHT_2025.get(team), PF_NIGHT_2026.get(team), w25, w26)
+        table[team] = DAY_WEIGHT * day_pf + NIGHT_WEIGHT * night_pf
 
     return table
 
@@ -367,12 +371,19 @@ def get_games(date_str):
     return games
 
 
-def is_day_game(game_date_str):
+def get_game_time_slot(game_date_str):
+    """Return 'day', 'prime', or 'late' based on ET hour of first pitch."""
     try:
         dt = datetime.fromisoformat(game_date_str.replace('Z', '+00:00'))
-        return dt.hour < DAY_GAME_CUTOFF
+        et_hour = (dt.hour - 4) % 24   # UTC → Eastern (EDT during baseball season)
+        if DAY_ET_START <= et_hour <= DAY_ET_END:
+            return 'day'
+        elif PRIME_ET_START <= et_hour <= PRIME_ET_END:
+            return 'prime'
+        else:
+            return 'late'
     except Exception:
-        return False
+        return 'prime'  # default to prime time
 
 
 def get_roster(team_id):
@@ -531,8 +542,9 @@ def fetch_raw_hitting(player_ids, season):
 
 def fetch_hitting_splits(player_ids, season, chunk_size=50):
     """
-    Fetch vs-LHP, vs-RHP, home, and away hitting splits.
-    Returns {pid: {'vs_L':{hr,pa}, 'vs_R':{hr,pa}, 'home':{hr,pa}, 'away':{hr,pa}}}
+    Fetch vs-LHP, vs-RHP, home, away, day, and night hitting splits.
+    Returns {pid: {'vs_L':{hr,pa}, 'vs_R':{hr,pa}, 'home':{hr,pa}, 'away':{hr,pa},
+                   'day':{hr,pa}, 'night':{hr,pa}}}
     """
     result = {}
     ids_list = list(player_ids)
@@ -541,12 +553,13 @@ def fetch_hitting_splits(player_ids, season, chunk_size=50):
         try:
             r = session.get('https://statsapi.mlb.com/api/v1/people',
                 params={'personIds': ','.join(str(x) for x in chunk),
-                        'hydrate': f'stats(group=[hitting],type=[statSplits],season={season})'},
+                        'hydrate': f'stats(group=[hitting],type=[statSplits],season={season},sitCodes=[vl,vr,h,a,d,n])'},
                 timeout=15)
             r.raise_for_status()
             for person in r.json().get('people', []):
                 pid = person['id']
-                entry = {'vs_L': {}, 'vs_R': {}, 'home': {}, 'away': {}}
+                entry = {'vs_L': {}, 'vs_R': {}, 'home': {}, 'away': {},
+                         'day': {}, 'night': {}}
                 for se in person.get('stats', []):
                     if se.get('type', {}).get('displayName', '').lower() != 'statsplits':
                         continue
@@ -563,6 +576,10 @@ def fetch_hitting_splits(player_ids, season, chunk_size=50):
                             entry['home'] = {'pa': pa, 'hr': hr}
                         elif code in ('a', 'r'):   # 'a'=away or 'r'=road
                             entry['away'] = {'pa': pa, 'hr': hr}
+                        elif code == 'd':
+                            entry['day'] = {'pa': pa, 'hr': hr}
+                        elif code == 'n':
+                            entry['night'] = {'pa': pa, 'hr': hr}
                 result[pid] = entry
         except Exception as e:
             print(f'  Splits chunk error: {e}')
@@ -960,6 +977,27 @@ def get_home_away_factor(bid, is_home, splits, batter_meta):
     return max(min(blended, HOME_AWAY_CAP[1]), HOME_AWAY_CAP[0])
 
 
+def get_day_night_batter_factor(bid, time_slot, splits, batter_meta):
+    """Batter's HR/PA in day vs night games compared to overall rate."""
+    side = 'day' if time_slot == 'day' else 'night'  # prime/late both use night split
+    sd   = splits.get(bid, {}).get(side, {})
+    s_pa = sd.get('pa', 0)
+    s_hr = sd.get('hr', 0)
+    if s_pa < MIN_HA_PA:
+        return 1.0
+    bs           = batter_meta.get('stat', {})
+    overall_pa   = bs.get('plateAppearances', 0) or 1
+    overall_hr   = bs.get('homeRuns', 0)
+    if overall_pa <= 0 or overall_hr == 0:
+        return 1.0
+    split_rate   = s_hr / s_pa
+    overall_rate = overall_hr / overall_pa
+    raw_factor   = split_rate / overall_rate if overall_rate > 0 else 1.0
+    conf         = min(s_pa, 200) / 200
+    blended      = conf * raw_factor + (1 - conf) * 1.0
+    return max(min(blended, DAY_NIGHT_BATTER_CAP[1]), DAY_NIGHT_BATTER_CAP[0])
+
+
 def get_bat_tracking_factor(batter_id, bat_tracking):
     bt    = bat_tracking.get(batter_id, {})
     blast = bt.get('blast_per_swing', BLAST_MEAN_ACT)
@@ -1040,14 +1078,10 @@ def get_spring_factor(batter_id, spring_stats):
     return max(min(1.0 + 0.15 * (adj / LEAGUE_HR_PA - 1.0), SPRING_CAP[1]), SPRING_CAP[0])
 
 
-def get_dn_factor(home_team, is_day):
-    return DAY_NIGHT_FACTORS.get((home_team, 'day' if is_day else 'night'), 1.0)
-
-
 # ── scorer ─────────────────────────────────────────────────────────────────────
 
-def score_batter(bid, opp_pid, home_team, game_pk, is_day, is_home,
-                 batter_stats, pitcher_stats, barrel_data, dn_park,
+def score_batter(bid, opp_pid, home_team, game_pk, time_slot, is_home,
+                 batter_stats, pitcher_stats, barrel_data, park_tbl,
                  bat_tracking, bvp, pars, splits,
                  recent_bat, pitcher_recent, bvp_career,
                  weather, spring_stats, cfg):
@@ -1071,7 +1105,7 @@ def score_batter(bid, opp_pid, home_team, game_pk, is_day, is_home,
         if ip >= MIN_IP:
             vuln = min((ps.get('homeRuns',0) / ip * 9) / LEAGUE_HR9, cfg['vuln_cap'])
 
-    park     = dn_park.get((home_team, is_day), 1.0)
+    park     = park_tbl.get(home_team, 1.0)
     platoon  = get_platoon_factor(bid, ph, splits, b)
 
     # Power factor — tunable exponents
@@ -1124,6 +1158,7 @@ def score_batter(bid, opp_pid, home_team, game_pk, is_day, is_home,
 
     pit_rf = get_pitcher_recent_factor(opp_pid, pitcher_stats, pitcher_recent)
     ha_f   = get_home_away_factor(bid, is_home, splits, b)
+    dn_bat_f = get_day_night_batter_factor(bid, time_slot, splits, b)
 
     # BvP — tunable weight (0=off, 1=full signal)
     raw_bvp = get_bvp_factor(bid, opp_pid, bvp_career, b)
@@ -1131,7 +1166,7 @@ def score_batter(bid, opp_pid, home_team, game_pk, is_day, is_home,
 
     exp_hr  = (rate * vuln * park * platoon * pwr_f * bt_f * pm_f
                * wx_f * st_f * form_f * pit_rf * bvp_f * ha_f
-               * AVG_PA_GAME * cfg['calibration'])
+               * dn_bat_f * AVG_PA_GAME * cfg['calibration'])
     hr_prob = 1 - math.exp(-exp_hr)
 
     return {
@@ -1140,8 +1175,8 @@ def score_batter(bid, opp_pid, home_team, game_pk, is_day, is_home,
     }
 
 
-def _precompute_row(bid, opp_id, home_team, pk, is_day, is_home, away_team,
-                    batter_stats, pit_stats, barrel, dn_park, bat_t,
+def _precompute_row(bid, opp_id, home_team, pk, time_slot, is_home, away_team,
+                    batter_stats, pit_stats, barrel, park_tbl, bat_t,
                     bvp_arsenal, pars, splits, recent_bat, pitcher_recent,
                     bvp_career, weather, spring, weather_splits):
     """Pre-compute all cfg-invariant factors for one batter-game row.
@@ -1172,7 +1207,7 @@ def _precompute_row(bid, opp_id, home_team, pk, is_day, is_home, away_team,
         if ip >= MIN_IP:
             raw_vuln = (ps.get('homeRuns', 0) / ip * 9) / LEAGUE_HR9
 
-    park    = dn_park.get((home_team, is_day), 1.0)
+    park    = park_tbl.get(home_team, 1.0)
     platoon = get_platoon_factor(bid, ph, splits, b)
 
     # Power: store base ratios so cfg exponents can be applied per config
@@ -1213,6 +1248,7 @@ def _precompute_row(bid, opp_id, home_team, pk, is_day, is_home, away_team,
 
     pit_rf     = get_pitcher_recent_factor(opp_id, pit_stats, pitcher_recent)
     ha_f       = get_home_away_factor(bid, is_home, splits, b)
+    dn_bat_f   = get_day_night_batter_factor(bid, time_slot, splits, b)
     raw_bvp    = get_bvp_factor(bid, opp_id, bvp_career, b)   # bvp_weight applied per cfg
     wx_hist_f  = get_weather_hist_factor(bid, pk, home_team, weather, weather_splits, b)
 
@@ -1223,7 +1259,7 @@ def _precompute_row(bid, opp_id, home_team, pk, is_day, is_home, away_team,
             wx_f, st_f,
             r_pa, r_hr, hr, pa,
             pit_rf, ha_f, raw_bvp,
-            b['name'], wx_hist_f)
+            b['name'], wx_hist_f, dn_bat_f)
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -1236,6 +1272,7 @@ TEST_DATES = [
     '2026-04-04','2026-04-05','2026-04-06','2026-04-07',
     '2026-04-08','2026-04-09','2026-04-10','2026-04-11',
     '2026-04-12','2026-04-13','2026-04-14','2026-04-15',
+    '2026-04-16', '2026-04-17',
 ]
 
 # ── 1. Fetch season-level shared data (once) ──────────────────────────────────
@@ -1315,8 +1352,11 @@ for date_str in TEST_DATES:
 
     print(f'\n  --- {date_str} ---')
     games = get_games(date_str)
-    day_c = sum(1 for g in games if is_day_game(g['game_date']))
-    print(f'  {len(games)} games ({day_c} day / {len(games)-day_c} night)')
+    slots = {}
+    for g in games:
+        s = get_game_time_slot(g['game_date'])
+        slots[s] = slots.get(s, 0) + 1
+    print(f'  {len(games)} games ({slots.get("day",0)} day / {slots.get("prime",0)} prime / {slots.get("late",0)} late)')
 
     batter_map = {}
     for g in games:
@@ -1329,7 +1369,7 @@ for date_str in TEST_DATES:
         batter_map[pk] = {
             'home': hi, 'away': ai,
             'home_team': g['home_team'], 'away_team': g['away_team'],
-            'is_day': is_day_game(g['game_date']),
+            'time_slot': get_game_time_slot(g['game_date']),
         }
 
     all_bat = {bid for v in batter_map.values() for s in ('home','away') for bid in v[s]}
@@ -1348,14 +1388,12 @@ for date_str in TEST_DATES:
     with ThreadPoolExecutor(max_workers=4) as pool:
         fut_25  = pool.submit(fetch_raw_hitting, all_bat, 2025)
         fut_26  = pool.submit(fetch_raw_hitting, all_bat, 2026)
-        fut_sp  = pool.submit(fetch_hitting_splits, all_bat, 2025)
         fut_pt  = pool.submit(fetch_stats_bulk, all_pit, 'pitching', PITCHER_SEASON)
         fut_wx  = pool.submit(fetch_weather, games, date_str)
         fut_ac  = pool.submit(get_actual_hrs, date_str)
         fut_pac = pool.submit(get_actual_hrs, prev_date)
         raw_25      = fut_25.result()
         raw_26      = fut_26.result()
-        splits_25   = fut_sp.result()
         pit_stats   = fut_pt.result()
         weather     = fut_wx.result()
         actual      = fut_ac.result()
@@ -1365,7 +1403,6 @@ for date_str in TEST_DATES:
     prev_hr_hitters = set(prev_actual.keys())
     print(f'  Hitting 2025: {len(raw_25)} with ≥{MIN_PA} PA')
     print(f'  Hitting 2026: {len(raw_26)} with ≥{MIN_PA} PA')
-    print(f'  Splits 2025: {len(splits_25)} batters')
     print(f'  Pitcher stats: {sum(1 for v in pit_stats.values() if v["stat"])} with data')
     print(f'  Weather: {len(weather)}/{outdoor} outdoor')
     print(f'  Actual HRs: {len(actual)} HR hitters')
@@ -1374,7 +1411,6 @@ for date_str in TEST_DATES:
     date_cache[date_str] = {
         'games': games, 'batter_map': batter_map,
         'raw_25': raw_25, 'raw_26': raw_26,
-        'splits_25': splits_25,
         'pit_stats': pit_stats,
         'recent_bat': recent_bat, 'pitcher_recent': pitcher_recent,
         'bvp_career': bvp_career_global,
@@ -1385,6 +1421,28 @@ for date_str in TEST_DATES:
     save_cache(f'date_{date_str}', date_cache[date_str])
     time.sleep(0.5)
 
+# ── 2b. Global splits (fetched once for ALL batters across all dates) ─────────
+all_batter_ids = set()
+for dc in date_cache.values():
+    all_batter_ids.update(dc['all_bat'])
+print(f'\n  Hitting splits 2025 (all {len(all_batter_ids)} batters)...')
+splits_2025_global = load_cache('splits_2025')
+if splits_2025_global is None:
+    splits_2025_global = fetch_hitting_splits(all_batter_ids, 2025)
+    save_cache('splits_2025', splits_2025_global)
+    print(f'  Fetched & cached: {len(splits_2025_global)} batters')
+else:
+    # If new batters appeared (new dates added), fetch the missing ones
+    missing = all_batter_ids - set(splits_2025_global.keys())
+    if missing:
+        print(f'  {len(missing)} new batters — fetching splits...')
+        new_splits = fetch_hitting_splits(missing, 2025)
+        splits_2025_global.update(new_splits)
+        save_cache('splits_2025', splits_2025_global)
+        print(f'  Updated cache: {len(splits_2025_global)} batters total')
+    else:
+        print(f'  From cache: {len(splits_2025_global)} batters')
+
 # ── 3. Grid search ────────────────────────────────────────────────────────────
 print()
 print('='*68)
@@ -1393,13 +1451,13 @@ print('='*68)
 print()
 
 PICKS_SKIP  = 1   # skip this many top-ranked players per game
-PICKS_TAKE  = 10  # then take this many
+PICKS_TAKE  = 5   # then take this many
 PICKS_PER_GAME = PICKS_TAKE
 
-# Pre-build batter_stats and dn_park once (single season/pf config)
+# Pre-build batter_stats and park_tbl once (single season/pf config)
 sw_label, sw_weights = SEASON_WEIGHT_CONFIGS[0]
 pf_label, pf_blend   = PF_BLEND_CONFIGS[0]
-dn_park = build_dn_park_table(pf_blend)
+park_tbl = build_park_table(pf_blend)
 
 # Pre-build per-date batter_stats
 date_batter_stats = {}
@@ -1413,7 +1471,20 @@ for date_str in TEST_DATES:
 
 # Pre-compute all cfg-invariant factors once per batter-game row.
 # The grid search inner loop then only does cheap arithmetic per config.
-print('  Pre-computing invariant row factors...')
+print('  Building 2026 starters list from starting lineups...')
+starters_2026 = set()
+for date_str in TEST_DATES:
+    dc = date_cache[date_str]
+    for g in dc['games']:
+        hi = g.get('home_lineup_ids', [])
+        ai = g.get('away_lineup_ids', [])
+        if hi:
+            starters_2026.update(hi)
+        if ai:
+            starters_2026.update(ai)
+print(f'  {len(starters_2026)} unique starters found across {len(TEST_DATES)} dates')
+
+print('  Pre-computing invariant row factors (starters only)...')
 precomputed_rows = {}   # {date_str: [row_tuple, ...]}
 for date_str in TEST_DATES:
     dc           = date_cache[date_str]
@@ -1429,11 +1500,13 @@ for date_str in TEST_DATES:
             ('home', g['away_pitcher_id'], True),
         ]:
             for bid in info[side]:
+                if bid not in starters_2026:
+                    continue
                 row = _precompute_row(
                     bid, opp_id, info['home_team'], pk,
-                    info['is_day'], is_home, info['away_team'],
-                    batter_stats, pit_blended, barrel, dn_park, bat_t,
-                    bvp, pars, dc['splits_25'],
+                    info['time_slot'], is_home, info['away_team'],
+                    batter_stats, pit_blended, barrel, park_tbl, bat_t,
+                    bvp, pars, splits_2025_global,
                     dc['recent_bat'], dc['pitcher_recent'], dc['bvp_career'],
                     dc['weather'], spring, wx_splits,
                 )
@@ -1443,7 +1516,7 @@ for date_str in TEST_DATES:
     print(f'    {date_str}: {len(rows)} eligible rows')
 
 _grid_key = 'grid_' + hashlib.md5(
-    ('v2' + str(sorted(TUNE_PARAM_GRID.items())) + ','.join(TEST_DATES)).encode()
+    ('v6_park_split' + str(sorted(TUNE_PARAM_GRID.items())) + ','.join(TEST_DATES)).encode()
 ).hexdigest()[:12]
 _grid_cache = load_cache(_grid_key)
 
@@ -1460,7 +1533,7 @@ else:
     #   0:bid  1:pk  2:away  3:home  4:rate  5:raw_vuln  6:park  7:platoon
     #   8:brl_ratio  9:ev_ratio  10:hh_f  11:bt_f  12:norm_rv
     #   13:wx_f  14:st_f  15:r_pa  16:r_hr  17:season_hr  18:season_pa
-    #   19:pit_rf  20:ha_f  21:raw_bvp  22:name  23:wx_hist_f
+    #   19:pit_rf  20:ha_f  21:raw_bvp  22:name  23:wx_hist_f  24:dn_bat_f
     def _rows_to_np(rows):
         if not rows:
             return None
@@ -1493,6 +1566,7 @@ else:
             'ha_f':      np.array(cols[20], dtype=np.float32),
             'raw_bvp':   np.array(cols[21], dtype=np.float32),
             'wx_hist_f': np.array(cols[23], dtype=np.float32),
+            'dn_bat_f':  np.array(cols[24], dtype=np.float32),
         }
 
     # Build per-date numpy arrays + eligible-row game groups + actual-HR labels
@@ -1537,7 +1611,8 @@ else:
     date_gpu = {}
     _row_keys = ('rate','raw_vuln','park','platoon','brl_ratio','ev_ratio','hh_f',
                  'bt_f','norm_rv','has_norm','wx_f','st_f','r_pa','r_hr',
-                 'season_hr','season_pa','pit_rf','ha_f','raw_bvp','wx_hist_f')
+                 'season_hr','season_pa','pit_rf','ha_f','raw_bvp','wx_hist_f',
+                 'dn_bat_f')
     for date_str in TEST_DATES:
         arrs = date_arrs[date_str]
         date_gpu[date_str] = (
@@ -1609,7 +1684,7 @@ else:
                       * pwr_f * garrs['bt_f'] * pm_f
                       * garrs['wx_f'] * garrs['st_f'] * form_f
                       * garrs['pit_rf'] * bvp_f * garrs['ha_f']
-                      * garrs['wx_hist_f']
+                      * garrs['wx_hist_f'] * garrs['dn_bat_f']
                       * _avpa * g_cal)                                      # (B, N)
             hr_prob = 1.0 - xp.exp(-exp_hr)                                # (B, N)
 
@@ -1686,7 +1761,7 @@ else:
              brl_ratio, ev_ratio, hh_f,
              bt_f, norm_rv, wx_f, st_f,
              r_pa, r_hr, season_hr, season_pa,
-             pit_rf, ha_f, raw_bvp, name, wx_hist_f) = row
+             pit_rf, ha_f, raw_bvp, name, wx_hist_f, dn_bat_f) = row
             vuln  = min(raw_vuln, _best_cfg['vuln_cap'])
             brl_f = brl_ratio ** _best_cfg['pwr_brl_exp']
             ev_f  = ev_ratio  ** _best_cfg['pwr_ev_exp']
@@ -1705,7 +1780,7 @@ else:
             bvp_f  = 1.0 + _best_cfg['bvp_weight'] * (raw_bvp - 1.0)
             exp_hr = (rate * vuln * park * platoon * pwr_f * bt_f * pm_f
                       * wx_f * st_f * form_f * pit_rf * bvp_f * ha_f
-                      * wx_hist_f * AVG_PA_GAME * _best_cfg['calibration'])
+                      * wx_hist_f * dn_bat_f * AVG_PA_GAME * _best_cfg['calibration'])
             hr_prob = 1 - math.exp(-exp_hr)
             _picks.setdefault(pk, []).append({
                 'batter_id': bid, 'name': name, 'hr_prob': round(hr_prob, 4),

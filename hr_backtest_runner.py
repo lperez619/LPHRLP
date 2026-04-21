@@ -130,116 +130,77 @@ PLATOON = {
     ('S','L'):1.05,('S','R'):1.05,
 }
 
-# ── Hardcoded day/night park factors (index / 100 → multiplicative) ────────────
-# Source: user-supplied Savant-style data.
-# Teams absent from a 2026 table → that slot uses 2025 only (no blend).
-# Tampa Bay 2025 = Steinbrenner Field (temp venue) → overridden with Tropicana values.
+# ── Hardcoded HR park factors (Savant index / 100 → multiplicative) ────────────
+# Source: Baseball Savant statcast park factors, HR column, condition=All, rolling=1yr
+# Updated: 2026-04-20
+# Tampa Bay 2025 = Steinbrenner Field (temp venue) → override with Tropicana estimate
+TAMPA_PF_2025 = 1.00   # Tropicana estimate for 2025
 
-# Tampa Bay 2026 values (Tropicana Field — overrides 2025 which was temp venue)
-TAMPA_PF_DAY   = 1.06
-TAMPA_PF_NIGHT = 0.95
-
-PF_DAY_2025 = {
-    'Athletics':             1.07,
-    'Colorado Rockies':      1.03,
-    'Baltimore Orioles':     1.33,
-    'Toronto Blue Jays':     1.12,
-    'Philadelphia Phillies': 1.00,
-    'Detroit Tigers':        1.09,
-    'Los Angeles Dodgers':   1.29,
-    'Boston Red Sox':        0.89,
-    'Minnesota Twins':       0.89,
-    'Chicago Cubs':          1.14,
-    'San Francisco Giants':  0.96,
-    'New York Yankees':      1.21,
-    'Milwaukee Brewers':     0.94,
-    'Arizona Diamondbacks':  0.76,
-    'Washington Nationals':  0.85,
-    'Atlanta Braves':        1.12,
-    'New York Mets':         0.98,
-    'Cleveland Guardians':   0.86,
-    'San Diego Padres':      0.84,
-    'Cincinnati Reds':       1.13,
-    'Los Angeles Angels':    0.99,
-    'Pittsburgh Pirates':    0.57,
-    'Chicago White Sox':     1.00,
-    'St. Louis Cardinals':   0.73,
-    'Kansas City Royals':    0.63,
-    'Seattle Mariners':      0.97,
-    'Miami Marlins':         0.63,
-    'Houston Astros':        0.95,
-    'Texas Rangers':         0.68,
-}
-
-PF_NIGHT_2025 = {
-    'Colorado Rockies':      1.12,
-    'Athletics':             1.14,
-    'Detroit Tigers':        1.20,
-    'Los Angeles Dodgers':   1.40,
-    'Arizona Diamondbacks':  0.96,
-    'Los Angeles Angels':    1.13,
-    'Boston Red Sox':        0.80,
-    'Washington Nationals':  1.00,
-    'Toronto Blue Jays':     1.24,
-    'Cincinnati Reds':       1.09,
-    'Minnesota Twins':       0.85,
-    'Philadelphia Phillies': 1.27,
-    'Atlanta Braves':        1.02,
-    'New York Mets':         1.03,
-    'Miami Marlins':         1.00,
-    'Chicago White Sox':     0.93,
-    'Kansas City Royals':    0.96,
-    'Houston Astros':        1.10,
-    'Milwaukee Brewers':     1.01,
-    'San Francisco Giants':  0.76,
-    'St. Louis Cardinals':   0.81,
-    'Baltimore Orioles':     1.13,
-    'Pittsburgh Pirates':    0.73,
-    'New York Yankees':      1.04,
-    'Chicago Cubs':          1.01,
-    'San Diego Padres':      0.95,
-    'Cleveland Guardians':   0.90,
-    'Texas Rangers':         0.85,
+# 2025 full-season HR park factors (Savant, condition=All)
+PF_HR_2025 = {
+    'Los Angeles Dodgers':   1.37,
+    'Baltimore Orioles':     1.21,
+    'Toronto Blue Jays':     1.18,
+    'Philadelphia Phillies': 1.17,
+    'Detroit Tigers':        1.14,
+    'Athletics':             1.12,
+    'Cincinnati Reds':       1.11,
+    'New York Yankees':      1.11,
+    'Los Angeles Angels':    1.11,
+    'Chicago Cubs':          1.11,
+    'Colorado Rockies':      1.10,
+    'Houston Astros':        1.06,
+    'Atlanta Braves':        1.05,
+    'New York Mets':         1.01,
     'Seattle Mariners':      0.98,
-}
-
-# 2026 DAY — only 16 teams listed; others use 2025 only
-PF_DAY_2026 = {
-    'Houston Astros':        2.29,
-    'Seattle Mariners':      2.12,
-    'Kansas City Royals':    1.45,
-    'Chicago Cubs':          1.30,
-    'Philadelphia Phillies': 1.19,
-    'Toronto Blue Jays':     1.16,
-    'Cincinnati Reds':       1.07,
-    'Miami Marlins':         1.04,
-    'New York Mets':         0.99,
     'Milwaukee Brewers':     0.98,
-    'San Diego Padres':      0.86,
-    'San Francisco Giants':  0.83,
-    'Arizona Diamondbacks':  0.68,
-    'Atlanta Braves':        0.57,
-    'St. Louis Cardinals':   0.50,
-    'Baltimore Orioles':     0.44,
+    'Chicago White Sox':     0.96,
+    'Washington Nationals':  0.93,
+    'San Diego Padres':      0.91,
+    'Arizona Diamondbacks':  0.90,
+    'Cleveland Guardians':   0.88,
+    'Minnesota Twins':       0.87,
+    'Miami Marlins':         0.84,
+    'San Francisco Giants':  0.84,
+    'Boston Red Sox':        0.84,
+    'Kansas City Royals':    0.83,
+    'Texas Rangers':         0.80,
+    'St. Louis Cardinals':   0.77,
+    'Pittsburgh Pirates':    0.66,
 }
 
-# 2026 NIGHT — only 15 teams (Phillies dropped: 0 HRs = no usable data yet)
-PF_NIGHT_2026 = {
-    'Kansas City Royals':    3.30,
-    'Arizona Diamondbacks':  1.45,
-    'Toronto Blue Jays':     1.89,
-    'Baltimore Orioles':     0.72,
-    'Seattle Mariners':      1.43,
-    'Houston Astros':        2.53,
-    'San Diego Padres':      1.22,
-    'San Francisco Giants':  1.29,
-    'Los Angeles Dodgers':   0.98,
-    'Milwaukee Brewers':     3.43,
-    'St. Louis Cardinals':   0.68,
-    'Miami Marlins':         0.53,
-    'Cincinnati Reds':       1.25,
-    'Atlanta Braves':        0.58,
-    'Chicago Cubs':          0.27,
+# 2026 HR park factors (Savant, condition=All, ~3 weeks of data as of 4/20)
+PF_HR_2026 = {
+    'New York Yankees':      2.06,
+    'Athletics':             1.55,
+    'Houston Astros':        1.51,
+    'Washington Nationals':  1.48,
+    'Cincinnati Reds':       1.43,
+    'Detroit Tigers':        1.42,
+    'Baltimore Orioles':     1.41,
+    'Milwaukee Brewers':     1.39,
+    'Los Angeles Dodgers':   1.27,
+    'Toronto Blue Jays':     1.25,
+    'Philadelphia Phillies': 1.22,
+    'San Diego Padres':      1.14,
+    'Cleveland Guardians':   0.98,
+    'Chicago Cubs':          0.97,
+    'Kansas City Royals':    0.94,
+    'Seattle Mariners':      0.90,
+    'Atlanta Braves':        0.88,
+    'Chicago White Sox':     0.86,
+    'Arizona Diamondbacks':  0.85,
+    'New York Mets':         0.85,
+    'Tampa Bay Rays':        0.80,
+    'Miami Marlins':         0.77,
+    'Colorado Rockies':      0.75,
+    'St. Louis Cardinals':   0.71,
+    'Minnesota Twins':       0.69,
+    'Los Angeles Angels':    0.67,
+    'Pittsburgh Pirates':    0.58,
+    'Texas Rangers':         0.54,
+    'San Francisco Giants':  0.49,
+    'Boston Red Sox':        0.39,
 }
 
 STADIUMS = {
@@ -316,28 +277,24 @@ def _blend_pf(pf25, pf26, w25, w26):
 def build_park_table(pf_blend):
     """
     Pre-compute {team: overall_park_factor} for every team.
-    Blends day (35%) and night (65%) park factors into a single venue multiplier.
-    The batter's personal day/prime/late performance is handled by dn_bat_f.
+    Uses overall HR park factors from Savant (condition=All).
+    Blends 2025 (full season) with 2026 (in-progress) via pf_blend weights.
+    Tampa Bay 2025 uses hardcoded Tropicana estimate (Savant 2025 = temp venue).
     """
-    DAY_WEIGHT   = 0.35   # ~35% of MLB games are day games
-    NIGHT_WEIGHT = 0.65
     w25 = pf_blend.get(2025, 1.0)
     w26 = pf_blend.get(2026, 0.0)
     table = {}
 
-    all_teams = set(PF_DAY_2025) | set(PF_NIGHT_2025)
+    all_teams = set(PF_HR_2025) | set(PF_HR_2026)
     all_teams.add('Tampa Bay Rays')
 
     for team in all_teams:
         if 'Tampa Bay' in team:
-            day_pf   = TAMPA_PF_DAY
-            night_pf = TAMPA_PF_NIGHT
+            pf25 = TAMPA_PF_2025
         else:
-            day_pf   = _blend_pf(
-                PF_DAY_2025.get(team), PF_DAY_2026.get(team), w25, w26)
-            night_pf = _blend_pf(
-                PF_NIGHT_2025.get(team), PF_NIGHT_2026.get(team), w25, w26)
-        table[team] = DAY_WEIGHT * day_pf + NIGHT_WEIGHT * night_pf
+            pf25 = PF_HR_2025.get(team)
+        pf26 = PF_HR_2026.get(team)
+        table[team] = _blend_pf(pf25, pf26, w25, w26)
 
     return table
 
